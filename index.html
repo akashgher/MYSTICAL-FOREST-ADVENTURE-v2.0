@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mystical Forest Adventure</title>
+    <style>
+        html, body { margin: 0; padding: 0; width: 100%; height: 100%; background-color: #000; overflow: hidden; }
+        #game-container { width: 100%; height: 100%; display: flex; justify-content: center; align-items: center; }
+        canvas { display: block; box-shadow: 0 0 50px rgba(0,0,0,0.8); border: 2px solid #1a1a1a; }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/pixi.js@8.x/dist/pixi.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/howler/2.2.4/howler.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
+</head>
+<body>
+
+<div id="game-container"></div>
+
+<script>
+(async () => {
+
+    // --- 1. CONFIGURATION ---
+    const CONFIG = {
+        WIDTH: 1920,
+        HEIGHT: 1080,
+        REEL_WIDTH: 250,      
+        SYMBOL_SIZE: 225,     
+        SYMBOL_DISPLAY_SIZE: 230, 
+        OFFSET_X: 0, 
+        OFFSET_Y: -25, 
+        NUM_REELS: 5,
+        NUM_ROWS: 3,
+        ASSET_PATH: './assets/' 
+    };
+
+    // --- 1.1 PAYLINE & MATH CONFIGURATION ---
+    const PAY_CONFIG = {
+        // 20 Fixed Win Lines (Row Indices: 0=Top, 1=Middle, 2=Bottom)
+        LINES: [
+            [1, 1, 1, 1, 1], // Line 1: Middle
+            [0, 0, 0, 0, 0], // Line 2: Top
+            [2, 2, 2, 2, 2], // Line 3: Bottom
+            [0, 1, 2, 1, 0], // Line 4: V Shape
+            [2, 1, 0, 1, 2], // Line 5: Inverted V
+            [0, 0, 1, 2, 2], // Line 6
+            [2, 2, 1, 0, 0], // Line 7
+            [1, 2, 2, 2, 1], // Line 8
+            [1, 0, 0, 0, 1], // Line 9
+            [0, 1, 1, 1, 0], // Line 10
+            [2, 1, 1, 1, 2], // Line 11
+            [0, 1, 0, 1, 0], // Line 12
+            [2, 1, 2, 1, 2], // Line 13
+            [1, 0, 1, 0, 1], // Line 14
+            [1, 2, 1, 2, 1], // Line 15
+            [0, 1, 2, 1, 1], // Line 16
+            [2, 1, 0, 1, 1], // Line 17
+            [0, 2, 0, 2, 0], // Line 18
+            [2, 0, 2, 0, 2], // Line 19
+            [1, 1, 2, 0, 1]  // Line 20
+        ],
+        // Payouts: Symbol ID (0-10) -> Match Count (3, 4, 5) -> Multiplier
+        PAYTABLE: {
+            0: {3: 5, 4: 15, 5: 50},   // Low Value
+            1: {3: 5, 4: 15, 5: 50},
+            2: {3: 10, 4: 25, 5: 100},
+            3: {3: 10, 4: 25, 5: 100},
+            4: {3: 15, 4: 50, 5: 150},
+            5: {3: 15, 4: 50, 5: 150},
+            6: {3: 25, 4: 100, 5: 250},
+            7: {3: 25, 4: 100, 5: 250},
+            8: {3: 50, 4: 250, 5: 500}, // High Value
+            9: {3: 100, 4: 500, 5: 1000},
+            10: {3: 200, 4: 1000, 5: 5000} // Jackpot
+        }
+    };
+
+    // --- 2. INIT PIXI ---
+    const app = new PIXI.Application();
+    globalThis.__PIXI_APP__ = app; 
+    
+    await app.init({
+        width: CONFIG.WIDTH, height: CONFIG.HEIGHT,
+        backgroundColor: 0x000000, resizeTo: window,
+        roundPixels: true 
+    });
+    app.stage.label = "Root_Stage"; 
+    document.getElementById('game-container').appendChild(app.canvas);
+
+    // --- 3. SOUNDS ---
+    const sounds = {};
+    const loadSound = (file, loop=false, vol=0.5) => new Howl({
+        src: [`${CONFIG.ASSET_PATH}sounds/${file}`],
+        loop: loop, volume: vol,
+        onloaderror: () => console.warn(`Sound missing: ${file}`)
+    });
+
+    sounds.spin = loadSound("reels_spin.wav");
+    sounds.win = loadSound("win.wav");
+    sounds.btn = loadSound("general_button.wav");
+    sounds.stop = loadSound("reel_stop.wav");
+    sounds.music = loadSound("music_main.wav", true, 0.3);
+
+    // --- 4. ASSETS ---
+    const manifest = {
+        bundles: [{
+            name: 'game-assets',
+            assets: [
+                { alias: 'bg_main', src: `${CONFIG.ASSET_PATH}background.png` },
+                { alias: 'win_glow', src: `${CONFIG.ASSET_PATH}win_bg.png` },
+                { alias: 'ui_game', src: `${CONFIG.ASSET_PATH}gameUI.json` },
+                { alias: 'ui_desktop', src: `${CONFIG.ASSET_PATH}desktopUI.json` },
+                { alias: 'sheet_sym', src: `${CONFIG.ASSET_PATH}symbols.json` },
+                { alias: 'preload_1', src: `${CONFIG.ASSET_PATH}preloader-1.json` },
+                { alias: 'preload_2', src: `${CONFIG.ASSET_PATH}preloader-2.json` }
+            ]
+        }]
+    };
+
+    function getTexture(name) {
+        if (PIXI.Assets.cache.has(name)) return PIXI.Texture.from(name);
+        try { return PIXI.Texture.from(name); } catch(e) { return PIXI.Texture.WHITE; }
+    }
+
+    // --- 4.1 PLACEHOLDER GENERATOR (Fallback if assets missing) ---
+    function generatePlaceholderAssets() {
+        // If assets fail to load, this creates colored blocks so the game still works
+        const colors = [0xFF0000, 0x00FF00, 0x0000FF, 0xFFFF00, 0x00FFFF, 0xFF00FF, 0xC0C0C0, 0x800000, 0x808000, 0x008000, 0xFFD700];
+        for(let i=0; i<=10; i++) {
+            if(!PIXI.Assets.cache.has(`symbol${i}`)) {
+                const g = new PIXI.Graphics().rect(0,0, 200, 200).fill(colors[i]).rect(0,0,200,200).stroke({width:10,color:0xFFFFFF});
+                const t = new PIXI.Text({text: i.toString(), style: {fontSize: 80}}); t.anchor.set(0.5); t.x=100; t.y=100; g.addChild(t);
+                PIXI.Assets.cache.set(`symbol${i}`, app.renderer.generateTexture(g));
+            }
+        }
+    }
+
+    try {
+        await PIXI.Assets.init({ manifest });
+        await PIXI.Assets.loadBundle('game-assets');
+        startPreloaderScene();
+    } catch (e) {
+        console.error("Asset Load Failed/Incomplete. Generating placeholders.", e);
+        generatePlaceholderAssets();
+        startPreloaderScene();
+    }
+
+    // --- 5. PRELOADER ---
+    function startPreloaderScene() {
+        const pContainer = new PIXI.Container();
+        pContainer.label = "Scene_Preloader"; 
+        app.stage.addChild(pContainer);
+
+        const bg = new PIXI.Sprite(getTexture("Loading_Screen_Background"));
+        bg.width = CONFIG.WIDTH; bg.height = CONFIG.HEIGHT;
+        pContainer.addChild(bg);
+
+        const logo = new PIXI.Sprite(getTexture("Game_Logo")); 
+        logo.anchor.set(0.5); logo.x = CONFIG.WIDTH/2; logo.y = CONFIG.HEIGHT/2 - 50;
+        logo.scale.set(0.8);
+        pContainer.addChild(logo);
+
+        const barGroup = new PIXI.Container();
+        barGroup.x = (CONFIG.WIDTH - 1029)/2; barGroup.y = CONFIG.HEIGHT - 280;
+        pContainer.addChild(barGroup);
+
+        const barFill = new PIXI.Sprite(getTexture("Loading_bar_fill_2"));
+        barFill.width = 0; barFill.y = 0;
+        
+        barGroup.addChild(new PIXI.Sprite(getTexture("Loading_bar_empty_1")));
+        barGroup.addChild(barFill);
+        barGroup.addChild(new PIXI.Sprite(getTexture("Loading_bar_design_3")));
+
+        const txtLoading = new PIXI.Sprite(getTexture("Loading..._text"));
+        txtLoading.anchor.set(0.5); txtLoading.x = 1029/2; txtLoading.y = 140;
+        barGroup.addChild(txtLoading);
+
+        let progress = 0;
+        const interval = setInterval(() => {
+            progress += 5;
+            barFill.width = (1029 * progress) / 100;
+            if(progress >= 100) {
+                clearInterval(interval);
+                txtLoading.visible = false;
+                showEnterButton(pContainer);
+            }
+        }, 20);
+    }
+
+    function showEnterButton(container) {
+        const style = { fontFamily: "Arial", fontSize: 50, fill: 0xFFD700, fontWeight: "bold", stroke: { color: 0x000000, width: 6 }, dropShadow: true };
+        const txt = new PIXI.Text({ text: "CLICK TO ENTER", style });
+        txt.anchor.set(0.5); txt.x = CONFIG.WIDTH/2; txt.y = CONFIG.HEIGHT - 200;
+        container.addChild(txt);
+        gsap.to(txt.scale, {x:1.1, y:1.1, yoyo:true, repeat:-1, duration:0.8});
+
+        const hit = new PIXI.Sprite(PIXI.Texture.WHITE);
+        hit.width = CONFIG.WIDTH; hit.height = CONFIG.HEIGHT; hit.alpha = 0; hit.interactive = true; hit.cursor = 'pointer';
+        container.addChild(hit);
+
+        hit.once('pointerdown', () => {
+            if(sounds.music) sounds.music.play();
+            gsap.to(container, {alpha: 0, duration: 0.5, onComplete: () => {
+                app.stage.removeChild(container);
+                initMainGame();
+            }});
+        });
+    }
+
+    // --- 6. MAIN GAME LOGIC & SCENE ---
+    function initMainGame() {
+        const gameContainer = new PIXI.Container();
+        app.stage.addChild(gameContainer);
+
+        // A. Background
+        const bg = new PIXI.Sprite(getTexture("bg_main"));
+        bg.width = CONFIG.WIDTH; bg.height = CONFIG.HEIGHT;
+        gameContainer.addChild(bg);
+
+        // B. Reel Frame
+        const frame = new PIXI.Sprite(getTexture("reelFrame.png"));
+        frame.anchor.set(0.5);
+        frame.x = CONFIG.WIDTH/2; 
+        frame.y = CONFIG.HEIGHT/2; 
+        frame.scale.set(1.1);
+        gameContainer.addChild(frame);
+
+        // C. Reels Container
+        const reelContainer = new PIXI.Container();
+        const totalWidth = CONFIG.NUM_REELS * CONFIG.REEL_WIDTH;
+        const totalHeight = CONFIG.NUM_ROWS * CONFIG.SYMBOL_SIZE;
+        reelContainer.x = (CONFIG.WIDTH - totalWidth) / 2 + CONFIG.OFFSET_X; 
+        reelContainer.y = (CONFIG.HEIGHT / 2) - (totalHeight / 2) + CONFIG.OFFSET_Y; 
+        gameContainer.addChild(reelContainer);
+
+        const mask = new PIXI.Graphics().rect(0, 0, totalWidth, totalHeight).fill(0xFFFFFF);
+        reelContainer.addChild(mask);
+        reelContainer.mask = mask;
+
+        // ** NEW: LINE GRAPHICS LAYER **
+        const lineGraphics = new PIXI.Graphics();
+        reelContainer.addChild(lineGraphics); // Add above mask for visibility or handle bounds carefully
+
+        // D. Logo
+        const logo = new PIXI.Sprite(getTexture("logo.png"));
+        logo.anchor.set(0.5);
+        logo.x = CONFIG.WIDTH / 2;
+        logo.y = 70; 
+        gameContainer.addChild(logo);
+
+        // --- UPDATED REEL SYSTEM ---
+        class Reel {
+            constructor(id) {
+                this.id = id;
+                this.container = new PIXI.Container();
+                this.container.x = id * CONFIG.REEL_WIDTH;
+                this.sprites = [];
+                this.speed = 0;
+                this.isStopping = false;
+                this.targetSymbols = []; // Store targets here
+                
+                // Row 0,1,2 are visible. We add padding rows for smooth looping.
+                for(let i=0; i < CONFIG.NUM_ROWS + 2; i++) {
+                    const s = new PIXI.Sprite(getTexture(`symbol${Math.floor(Math.random()*11)}`));
+                    s.anchor.set(0.5);
+                    s.x = CONFIG.REEL_WIDTH / 2; 
+                    s.y = (i-1) * CONFIG.SYMBOL_SIZE + CONFIG.SYMBOL_SIZE/2;
+                    s.width = CONFIG.SYMBOL_DISPLAY_SIZE;
+                    s.height = CONFIG.SYMBOL_DISPLAY_SIZE;
+                    this.container.addChild(s);
+                    this.sprites.push(s);
+                }
+            }
+            update(delta) {
+                if(this.speed > 0) {
+                    this.sprites.forEach(s => {
+                        s.y += this.speed * delta;
+                        // Loop to top
+                        if(s.y > (CONFIG.NUM_ROWS * CONFIG.SYMBOL_SIZE) + CONFIG.SYMBOL_SIZE/2) {
+                            s.y -= (this.sprites.length) * CONFIG.SYMBOL_SIZE;
+                            // While spinning, show random textures
+                            s.texture = getTexture(`symbol${Math.floor(Math.random()*11)}`);
+                        }
+                    });
+                }
+                
+                // STOPPING LOGIC: Snap to Grid & Set Targets
+                if(this.isStopping && this.speed > 0) {
+                    this.speed = 0;
+                    
+                    // Sort sprites by Y position to identify Top, Middle, Bottom
+                    this.sprites.sort((a,b) => a.y - b.y);
+                    
+                    // Assign Target Textures to the visible sprites
+                    // Due to padding, indices 1, 2, 3 correspond to Row 0, 1, 2 visible
+                    if(this.targetSymbols.length === 3) {
+                        this.sprites[1].texture = getTexture(`symbol${this.targetSymbols[0]}`); // Top
+                        this.sprites[2].texture = getTexture(`symbol${this.targetSymbols[1]}`); // Mid
+                        this.sprites[3].texture = getTexture(`symbol${this.targetSymbols[2]}`); // Bot
+                    }
+
+                    // Reset Positions Perfectly
+                    this.sprites.forEach((s, i) => {
+                        s.y = (i-1) * CONFIG.SYMBOL_SIZE + CONFIG.SYMBOL_SIZE/2;
+                        s.width = CONFIG.SYMBOL_DISPLAY_SIZE;
+                        s.height = CONFIG.SYMBOL_DISPLAY_SIZE;
+                        s.alpha = 1; s.scale.set(1); s.tint = 0xFFFFFF; // Reset anims
+                    });
+                    
+                    if(sounds.stop) sounds.stop.play();
+                }
+            }
+            spin() { 
+                this.isStopping = false; 
+                this.speed = 55; 
+                this.sprites.forEach(s => { s.alpha = 1; s.scale.set(1); s.tint = 0xFFFFFF;});
+            }
+            
+            // Accept specific symbols to stop on [Row0, Row1, Row2]
+            stop(targets) { 
+                this.targetSymbols = targets; 
+                this.isStopping = true; 
+            }
+        }
+
+        const reels = [];
+        for(let i=0; i<CONFIG.NUM_REELS; i++) {
+            const r = new Reel(i);
+            reels.push(r);
+            reelContainer.addChild(r.container);
+        }
+        app.ticker.add((ticker) => reels.forEach(r => r.update(ticker.deltaTime)));
+
+        // --- E. UI CONTROLS ---
+        const uiLayer = new PIXI.Container();
+        uiLayer.label = "Layer_UI";
+        uiLayer.y = 880; 
+        gameContainer.addChild(uiLayer);
+
+        // 1. Ticker
+        const tickerBar = new PIXI.Sprite(getTexture("woodframe.png"));
+        tickerBar.scale.set(3,1);
+        tickerBar.anchor.set(0.5, 0); tickerBar.x = CONFIG.WIDTH / 2; tickerBar.y = 0;
+        uiLayer.addChild(tickerBar);
+
+        const tickerText = new PIXI.Text({text: "GOOD LUCK", style: {
+            fontFamily: "Arial", fontSize: 42, fill: 0xFFD700, fontWeight: "bold",
+            stroke: { color: 0x3e2723, width: 6 }, dropShadow: true, dropShadowColor: '#000000'
+        }});
+        tickerText.anchor.set(0.5); tickerText.x = CONFIG.WIDTH / 2; tickerText.y = 45;
+        uiLayer.addChild(tickerText);
+
+        // 2. Buttons & Displays
+        const controlsY = 150; 
+        const spinbtnY = 110; 
+        const valueTextStyle = { 
+            fontFamily: "Arial", fontSize: 50, fill: 0xFFFFFF, fontWeight: "bold",
+            stroke: { color: 0x000000, width: 8 }, dropShadow: true, resolution: 2
+        };
+
+        // Info
+        const btnInfo = new PIXI.Sprite(getTexture("Info_Idle.png"));
+        btnInfo.anchor.set(0.5); btnInfo.x = 300; btnInfo.y = controlsY; btnInfo.scale.set(0.8);
+        uiLayer.addChild(btnInfo);
+
+        // Balance Panel
+        const balContainer = new PIXI.Container();
+        balContainer.x = 550; balContainer.y = controlsY;
+        uiLayer.addChild(balContainer);
+        const balBg = new PIXI.Sprite(getTexture("woodframe.png"));
+        balBg.anchor.set(0.5); balBg.scale.set(0.75, 0.8); balContainer.addChild(balBg);
+        const balLabel = new PIXI.Sprite(getTexture("Balance_Text.png"));
+        balLabel.anchor.set(0.5); balLabel.y = -18; balLabel.scale.set(0.5); balContainer.addChild(balLabel);
+        
+        let balance = 10000;
+        const balVal = new PIXI.Text({text: "$10,000.00", style: { ...valueTextStyle, fill: 0xFFD700 }}); 
+        balVal.anchor.set(0.5); balVal.scale.set(0.5); balVal.y = 12; 
+        balContainer.addChild(balVal);
+
+        // Win Panel
+        const winContainer = new PIXI.Container();
+        winContainer.x = 880; winContainer.y = controlsY;
+        uiLayer.addChild(winContainer);
+        const winBg = new PIXI.Sprite(getTexture("woodframe.png"));
+        winBg.anchor.set(0.5); winBg.scale.set(0.75, 0.8); winContainer.addChild(winBg);
+        const winLabel = new PIXI.Sprite(getTexture("Win_Text.png"));
+        winLabel.anchor.set(0.5); winLabel.y = -18; winLabel.scale.set(0.5); winContainer.addChild(winLabel);
+        
+        const winVal = new PIXI.Text({text: "$0.00", style: { ...valueTextStyle, fill: 0x00FF00 }}); 
+        winVal.anchor.set(0.5); winVal.scale.set(0.5); winVal.y = 12; 
+        winContainer.addChild(winVal);
+
+        // Bet Panel
+        const betContainer = new PIXI.Container();
+        betContainer.x = 1200; betContainer.y = controlsY;
+        uiLayer.addChild(betContainer);
+        const betBg = new PIXI.Sprite(getTexture("woodframe.png"));
+        betBg.anchor.set(0.5); betBg.scale.set(0.65, 0.8); betContainer.addChild(betBg);
+        const betLabel = new PIXI.Sprite(getTexture("Bet_Text.png"));
+        betLabel.anchor.set(0.5); betLabel.y = -18; betLabel.scale.set(0.5); betContainer.addChild(betLabel);
+
+        let bet = 1.00;
+        const betVal = new PIXI.Text({text: "$1.00", style: valueTextStyle});
+        betVal.anchor.set(0.5); betVal.scale.set(0.5); betVal.y = 12; betContainer.addChild(betVal);
+
+        // Bet Buttons
+        const btnMinus = new PIXI.Sprite(getTexture("Arrow_L_Idle.png"));
+        btnMinus.anchor.set(0.5); btnMinus.x = -100; btnMinus.y = 0; btnMinus.scale.set(0.8);
+        btnMinus.interactive = true; btnMinus.cursor = 'pointer';
+        betContainer.addChild(btnMinus);
+
+        const btnPlus = new PIXI.Sprite(getTexture("Arrow_R_Idle.png"));
+        btnPlus.anchor.set(0.5); btnPlus.x = 100; btnPlus.y = 0; btnPlus.scale.set(0.8);
+        btnPlus.interactive = true; btnPlus.cursor = 'pointer';
+        betContainer.addChild(btnPlus);
+
+        // Spin Button
+        const btnSpin = new PIXI.Sprite(getTexture("Spin_Idle.png"));
+        btnSpin.anchor.set(0.5); btnSpin.x = 1600; btnSpin.y = spinbtnY; btnSpin.scale.set(1);
+        btnSpin.interactive = true; btnSpin.cursor = 'pointer';
+        uiLayer.addChild(btnSpin);
+
+        // --- GAMEPLAY LOGIC & MATH ---
+        let isSpinning = false;
+        const toCurrency = (num) => "$" + num.toFixed(2);
+
+        // --- WIN CALCULATOR ---
+        function calculateResults(grid, currentBet) {
+            const results = { totalWin: 0, winningLines: [] };
+            const lineBet = currentBet / 20; // 20 Fixed lines
+
+            PAY_CONFIG.LINES.forEach((lineDef, lineIndex) => {
+                // Get symbols on this line path
+                const lineSymbols = lineDef.map((rowIndex, colIndex) => grid[colIndex][rowIndex]);
+                
+                // Check matches from left
+                const firstSym = lineSymbols[0];
+                let matchCount = 1;
+                for(let i=1; i<lineSymbols.length; i++) {
+                    if(lineSymbols[i] === firstSym) matchCount++;
+                    else break;
+                }
+
+                // Check Paytable
+                if(matchCount >= 3) {
+                    const multiplier = PAY_CONFIG.PAYTABLE[firstSym]?.[matchCount] || 0;
+                    if(multiplier > 0) {
+                        const winAmt = lineBet * multiplier;
+                        results.totalWin += winAmt;
+                        results.winningLines.push({
+                            lineIndex: lineIndex,
+                            amount: winAmt,
+                            symbol: firstSym,
+                            coords: lineDef.slice(0, matchCount).map((r, c) => ({col: c, row: r}))
+                        });
+                    }
+                }
+            });
+            return results;
+        }
+
+        // --- COIN COUNTER ANIMATION ---
+        function animateValue(obj, start, end, duration) {
+            let startTimestamp = null;
+            const step = (timestamp) => {
+                if (!startTimestamp) startTimestamp = timestamp;
+                const progress = Math.min((timestamp - startTimestamp) / duration, 1);
+                obj.text = toCurrency(start + progress * (end - start));
+                if (progress < 1) window.requestAnimationFrame(step);
+                else obj.text = toCurrency(end);
+            };
+            window.requestAnimationFrame(step);
+        }
+
+        // --- INPUT HANDLERS ---
+        btnMinus.on('pointerdown', () => {
+            if(!isSpinning && bet > 1) { 
+                bet -= 1; betVal.text = toCurrency(bet); sounds.btn.play(); 
+            }
+        });
+
+        btnPlus.on('pointerdown', () => {
+            if(!isSpinning && bet < 100) { 
+                bet += 1; betVal.text = toCurrency(bet); sounds.btn.play(); 
+            }
+        });
+
+        btnSpin.on('pointerdown', () => {
+            if(isSpinning || balance < bet) return;
+            isSpinning = true; 
+            
+            // 1. Deduct & Reset
+            balance -= bet; 
+            balVal.text = toCurrency(balance);
+            winVal.text = "$0.00";
+            tickerText.text = "GOOD LUCK!";
+            lineGraphics.clear(); // Remove old lines
+            
+            btnSpin.texture = getTexture("Spin_Pressed.png");
+            if(sounds.spin) sounds.spin.play();
+
+            // 2. MATH: Generate Grid & Calculate Wins
+            const resultGrid = [];
+            for(let c=0; c < CONFIG.NUM_REELS; c++) {
+                const col = [];
+                for(let r=0; r < CONFIG.NUM_ROWS; r++) {
+                    col.push(Math.floor(Math.random() * 11)); // IDs 0-10
+                }
+                resultGrid.push(col);
+            }
+            const spinResults = calculateResults(resultGrid, bet);
+
+            // 3. Start Visuals
+            reels.forEach(r => r.spin());
+
+            // 4. Schedule Stops
+            reels.forEach((r, i) => {
+                setTimeout(() => {
+                    r.stop(resultGrid[i]); // Pass target column to Reel
+                    
+                    if(i === reels.length - 1) {
+                        setTimeout(() => {
+                            handleEndGame(spinResults);
+                        }, 500);
+                    }
+                }, 2000 + (i * 300));
+            });
+        });
+
+        function handleEndGame(results) {
+            isSpinning = false;
+            btnSpin.texture = getTexture("Spin_Idle.png");
+
+            if(results.totalWin > 0) {
+                tickerText.text = `WON ${toCurrency(results.totalWin)}!`;
+                if(sounds.win) sounds.win.play();
+                
+                // Animate Balance
+                const oldBal = balance;
+                balance += results.totalWin;
+                animateValue(balVal, oldBal, balance, 1500);
+                winVal.text = toCurrency(results.totalWin);
+
+                showWinAnimations(results.winningLines);
+                showWinEffect(results.totalWin); // The big popup
+            } else {
+                tickerText.text = "TRY AGAIN";
+            }
+        }
+
+        function showWinAnimations(winningLines) {
+            // Draw Lines
+            winningLines.forEach((win, idx) => {
+                const colors = [0xFF0000, 0x00FF00, 0x0000FF, 0xFFFF00, 0xFF00FF];
+                const color = colors[idx % colors.length];
+
+                lineGraphics.moveTo(0,0);
+                win.coords.forEach((c, i) => {
+                    const x = c.col * CONFIG.REEL_WIDTH + CONFIG.REEL_WIDTH/2;
+                    const y = c.row * CONFIG.SYMBOL_SIZE + CONFIG.SYMBOL_SIZE/2;
+                    if(i===0) lineGraphics.moveTo(x,y);
+                    else lineGraphics.lineTo(x,y);
+
+                    // Animate Symbol (Note: sprite index off by 1 due to padding)
+                    const sprite = reels[c.col].sprites[c.row + 1];
+                    if(sprite) {
+                        gsap.to(sprite.scale, {x:1.2, y:1.2, duration:0.3, yoyo:true, repeat:3});
+                        gsap.to(sprite, {alpha:0.5, duration:0.15, yoyo:true, repeat:5, onComplete:()=>sprite.alpha=1});
+                    }
+                });
+                lineGraphics.stroke({width: 10, color: color, alpha: 0.8, cap:'round', join:'round'});
+            });
+        }
+
+        function showWinEffect(amount) {
+            const winCont = new PIXI.Container();
+            winCont.x = CONFIG.WIDTH/2; winCont.y = CONFIG.HEIGHT/2;
+            gameContainer.addChild(winCont);
+
+            const glow = new PIXI.Sprite(getTexture("win_glow"));
+            glow.anchor.set(0.5); glow.scale.set(0);
+            winCont.addChild(glow);
+
+            const txt = new PIXI.Text({text: `WIN ${toCurrency(amount)}`, style: {
+                fontSize: 100, fill: 0xFFD700, stroke: { color: 0x000000, width: 8 }, dropShadow: true
+            }});
+            txt.anchor.set(0.5); txt.scale.set(0);
+            winCont.addChild(txt);
+
+            gsap.to(glow.scale, {x: 1.5, y: 1.5, duration: 0.5, ease: "back.out"});
+            gsap.to(txt.scale, {x: 1, y: 1, duration: 0.5, ease: "back.out"});
+            gsap.to(winCont, {alpha: 0, duration: 0.5, delay: 2, onComplete: () => winCont.destroy()});
+        }
+    }
+
+    // Responsive Scaling
+    app.ticker.add(() => {
+        const scale = Math.min(window.innerWidth/CONFIG.WIDTH, window.innerHeight/CONFIG.HEIGHT);
+        app.stage.scale.set(scale);
+        app.stage.x = (window.innerWidth - CONFIG.WIDTH*scale)/2;
+        app.stage.y = (window.innerHeight - CONFIG.HEIGHT*scale)/2;
+    });
+
+})();
+</script>
+</body>
+</html>
